@@ -7,7 +7,7 @@ name = "gestureify"
 version = "0.1.0"
 description = "Control Spotify with hand gestures via your webcam."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "LeoMattosMartins" }]
 

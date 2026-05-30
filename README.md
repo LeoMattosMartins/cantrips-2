@@ -36,7 +36,7 @@ The session is **off by default**. Nothing is dispatched to Spotify until you ac
 
 ## Requirements
 
-- Python **3.10+** (required for `slots=True` dataclasses and `str | None` union syntax)
+- Python **3.10 – 3.12** (Python 3.13 ships with Tcl/Tk 9.0 which has a known crash on macOS; the project is pinned to `<3.13` until upstream resolves this)
 - [uv](https://docs.astral.sh/uv/) package manager
 - A webcam
 - A **Spotify Premium** account (the Spotify Web API requires Premium for playback control; Free accounts use the media-key fallback automatically)
@@ -271,6 +271,13 @@ Try setting `CAMERA_INDEX=1` (or `2`) in your `.env` file. On Linux, list availa
 
 **The HUD font looks wrong**
 Install the Monocraft font manually: double-click `gestureify/assets/fonts/Monocraft.ttf` and install it system-wide, then restart Gestureify.
+
+**HUD crashes immediately on macOS with `NSInvalidArgumentException: -[NSApplication macOSVersion]`**
+This is a known crash in Tcl/Tk 9.0 (bundled with Python 3.13) on macOS. The project is pinned to Python `<3.13` to avoid it. If `uv` still picks up Python 3.13, force 3.12 explicitly:
+```bash
+uv python pin 3.12
+uv sync
+```
 
 **Gestures are triggering when I don't want them to**
 Make sure the session is OFF (the HUD should show `SESSION OFF` in grey). Hold an open palm for ~1.5 seconds to deactivate.
