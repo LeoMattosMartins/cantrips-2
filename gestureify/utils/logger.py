@@ -21,19 +21,28 @@ import os
 import sys
 
 
-def configure_root_logger() -> None:
+def configure_root_logger(log_level: str | None = None) -> None:
     """Configure the root logger once at application startup.
 
-    Reads ``LOG_LEVEL`` from the environment (set by
-    ``gestureify.config.env_loader``) and attaches a ``StreamHandler``
-    writing to *stderr*.  Safe to call multiple times; subsequent calls
-    are no-ops if handlers are already attached.
+    Parameters
+    ----------
+    log_level:
+        Optional log level string (e.g. ``"DEBUG"``, ``"INFO"``).  When
+        *None*, falls back to the ``LOG_LEVEL`` environment variable, then
+        ``"INFO"``.  Prefer passing the validated value from ``AppConfig``.
+
+    Safe to call multiple times; subsequent calls are no-ops if handlers
+    are already attached.
     """
     root = logging.getLogger()
     if root.handlers:
         return  # Already configured — do not add duplicate handlers.
 
-    level_name: str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level_name: str = (
+        log_level.upper()
+        if log_level is not None
+        else os.environ.get("LOG_LEVEL", "INFO").upper()
+    )
     level: int = getattr(logging, level_name, logging.INFO)
 
     handler = logging.StreamHandler(sys.stderr)

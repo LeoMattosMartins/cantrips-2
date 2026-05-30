@@ -4,7 +4,7 @@ main.py
 Gestureify — Gesture-controlled Spotify player.
 
 Entry point.  Responsibilities:
-  1. Load environment / validate secrets.
+  1. Load environment / validate secrets via ``AppConfig``.
   2. Configure the root logger.
   3. Authenticate with Spotify (PKCE flow, cached tokens).
   4. Build all sub-system objects and wire them together.
@@ -21,6 +21,9 @@ Communication : ``queue.Queue[HUDMessage]`` (CV → HUD, one-way).
 
 Design notes
 ------------
+* ``AppConfig.from_env()`` is the single validated entry-point for all runtime
+  configuration.  A ``pydantic.ValidationError`` on startup means the user
+  gets a structured, actionable error listing every problem at once.
 * All sub-systems are constructed here and injected into their consumers
   (dependency injection, not global singletons).
 * The CV thread is a daemon thread so it is killed automatically if the
@@ -31,16 +34,17 @@ Design notes
 
 from __future__ import annotations
 
-import os
 import queue
 import signal
 import sys
 import threading
-from typing import Optional
+
+import pydantic
 
 from gestureify.auth.spotify_auth import SpotifyAuth
 from gestureify.auth.token_store import TokenStore
 from gestureify.config import load_env, settings
+from gestureify.config.app_config import AppConfig
 from gestureify.controller.media_keys import MediaKeyFallback
 from gestureify.controller.playback_controller import PlaybackController
 from gestureify.controller.spotify_client import SpotifyClient
@@ -58,12 +62,12 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Action label strings shown in the HUD.
 # ---------------------------------------------------------------------------
-_LABEL_PAUSE = "⏸  Pause"
-_LABEL_RESUME = "▶  Resume"
-_LABEL_NEXT = "⏭  Next"
-_LABEL_PREV = "⏮  Previous"
-_LABEL_ACTIVE = "✋ Session ON"
-_LABEL_IDLE = "🤚 Session OFF"
+_LABEL_PAUSE = "PAUSE"
+_LABEL_RESUME = "RESUME"
+_LABEL_NEXT = "NEXT >"
+_LABEL_PREV = "< PREV"
+_LABEL_ACTIVE = "SESSION ON"
+_LABEL_IDLE = "SESSION OFF"
 
 
 def _cv_loop(
@@ -88,7 +92,6 @@ def _cv_loop(
     stop_event:
         Set this event to request a graceful shutdown.
     """
-    # Track playback state locally to know whether to pause or resume.
     is_playing: bool = True
 
     for frame in capture.frames():
@@ -102,7 +105,9 @@ def _cv_loop(
 
         if result.session_toggled:
             action_label = (
-                _LABEL_ACTIVE if result.session_state is SessionState.ACTIVE else _LABEL_IDLE
+                _LABEL_ACTIVE
+                if result.session_state is SessionState.ACTIVE
+                else _LABEL_IDLE
             )
 
         if result.session_state is SessionState.ACTIVE:
@@ -119,11 +124,6 @@ def _cv_loop(
                 controller.pause()
                 is_playing = False
                 action_label = _LABEL_PAUSE
-            elif result.gesture is GestureLabel.OPEN_PALM and not is_playing:
-                # Note: OPEN_PALM is suppressed as a command in the pipeline
-                # when the session is already ACTIVE, so this branch is only
-                # reached during the brief window before the wake-toggle fires.
-                pass
             elif result.gesture is GestureLabel.CLOSED_FIST and not is_playing:
                 pass  # Already paused; do nothing.
 
@@ -146,13 +146,25 @@ def _cv_loop(
     logger.info("CV loop exited.")
 
 
-def _build_pipeline() -> CVPipeline:
-    """Construct and return a fully wired ``CVPipeline``."""
-    extractor = LandmarkExtractor()
+def _build_pipeline(cfg: AppConfig) -> CVPipeline:
+    """Construct and return a fully wired ``CVPipeline`` from *cfg*."""
+    extractor = LandmarkExtractor(
+        max_hands=cfg.mp_max_hands,
+        detection_confidence=cfg.mp_detection_confidence,
+        tracking_confidence=cfg.mp_tracking_confidence,
+    )
     extractor.open()
-    classifier = GestureClassifier()
-    gate = SessionGate()
-    swipe = SwipeDetector()
+    classifier = GestureClassifier(
+        fist_threshold=cfg.fist_ratio_threshold,
+        palm_threshold=cfg.wake_palm_ratio_threshold,
+        pinch_threshold=cfg.pinch_distance_threshold,
+    )
+    gate = SessionGate(hold_seconds=cfg.wake_hold_seconds)
+    swipe = SwipeDetector(
+        velocity_window=cfg.swipe_velocity_window,
+        velocity_threshold=cfg.swipe_velocity_threshold,
+        cooldown_seconds=cfg.swipe_cooldown_seconds,
+    )
     return CVPipeline(
         extractor=extractor,
         classifier=classifier,
@@ -170,23 +182,31 @@ def main() -> int:
     int
         Exit code (0 = success, 1 = error).
     """
-    # --- Bootstrap --------------------------------------------------------
+    # --- Bootstrap: load .env then validate all config via Pydantic ----------
     try:
         load_env()
     except (EnvironmentError, FileNotFoundError) as exc:
-        # Logger not yet configured; print directly.
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
-    configure_root_logger()
+    try:
+        cfg = AppConfig.from_env()
+    except pydantic.ValidationError as exc:
+        print("[ERROR] Configuration is invalid:\n", file=sys.stderr)
+        for err in exc.errors():
+            loc = " → ".join(str(x) for x in err["loc"])
+            print(f"  {loc}: {err['msg']}", file=sys.stderr)
+        return 1
+
+    configure_root_logger(cfg.log_level)
     logger.info("Gestureify starting up (v%s).", "0.1.0")
 
     # --- Authentication ---------------------------------------------------
     token_store = TokenStore(settings.TOKEN_CACHE_PATH)
     auth = SpotifyAuth(
-        client_id=os.environ["SPOTIFY_CLIENT_ID"],
-        redirect_uri=settings.SPOTIFY_REDIRECT_URI,
-        scopes=settings.SPOTIFY_SCOPES,
+        client_id=cfg.spotify_client_id,
+        redirect_uri=cfg.spotify_redirect_uri,
+        scopes=cfg.spotify_scopes,
         token_store=token_store,
     )
     try:
@@ -204,7 +224,7 @@ def main() -> int:
         media_keys=media_keys,
     )
 
-    pipeline = _build_pipeline()
+    pipeline = _build_pipeline(cfg)
 
     hud_queue: queue.Queue[HUDMessage] = queue.Queue(maxsize=10)
     hud = HUDOverlay(message_queue=hud_queue)
@@ -213,10 +233,10 @@ def main() -> int:
 
     # --- Camera -----------------------------------------------------------
     capture = CameraCapture(
-        index=int(os.environ.get("CAMERA_INDEX", settings.CAMERA_INDEX)),
-        width=settings.CAMERA_WIDTH,
-        height=settings.CAMERA_HEIGHT,
-        fps=settings.CAMERA_FPS,
+        index=cfg.camera_index,
+        width=cfg.camera_width,
+        height=cfg.camera_height,
+        fps=cfg.camera_fps,
     )
     try:
         capture.open()
@@ -225,7 +245,7 @@ def main() -> int:
         return 1
 
     # --- Signal handling --------------------------------------------------
-    def _shutdown(signum, frame) -> None:  # noqa: ANN001
+    def _shutdown(signum: int, frame: object) -> None:
         logger.info("Shutdown signal received.")
         stop_event.set()
         hud.stop()

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Control Spotify with hand gestures via your webcam."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "LeoMattosMartins" }]
 
 dependencies = [
@@ -19,6 +19,10 @@ dependencies = [
     "jax[cpu]>=0.4.25",
     # Input simulation — OS media key fallback.
     "pynput>=1.7.6",
+    # Runtime configuration validation.
+    "pydantic>=2.7.0",
+    # Font registration shim for Tkinter (loads Monocraft TTF at runtime).
+    "pyglet>=2.0.0",
 ]
 
 [project.optional-dependencies]

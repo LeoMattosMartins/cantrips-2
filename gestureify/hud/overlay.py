@@ -33,6 +33,7 @@ import tkinter as tk
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+from gestureify.assets.font_loader import load as _load_font
 from gestureify.config import settings
 from gestureify.cv_engine.session_gate import SessionState
 from gestureify.utils.logger import get_logger
@@ -77,10 +78,12 @@ _ARC_ACTIVE  = "#39ff14"   # hold-progress arc — ACTIVE
 # Fingertip landmark indices (brighter dot colour).
 _FINGERTIP_IDX = {4, 8, 12, 16, 20}
 
-# Monospace font stack.
-_FONT_MONO_SM  = ("Courier New", 8)
-_FONT_MONO_MED = ("Courier New", 10, "bold")
-_FONT_MONO_LG  = ("Courier New", 11, "bold")
+# Monocraft font family — resolved at import time (falls back to Courier New).
+_MONO_FAMILY: str = _load_font()
+
+_FONT_MONO_SM  = (_MONO_FAMILY, 8)
+_FONT_MONO_MED = (_MONO_FAMILY, 10, "bold")
+_FONT_MONO_LG  = (_MONO_FAMILY, 11, "bold")
 
 
 # ---------------------------------------------------------------------------
