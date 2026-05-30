@@ -6,7 +6,7 @@ Minimal monochrome floating overlay — terminal / hacker aesthetic.
 Design language
 ---------------
 * Background: pure black (#000000).
-* All text: monospace (Courier / Courier New), dim green (#3a3a3a) for
+* All text: monospace (Monocraft / Courier New), dim green (#3a3a3a) for
   inactive elements, bright green (#39ff14) for ACTIVE state, grey (#888888)
   for labels.
 * No rounded corners, no colour accents beyond the single green status dot.
@@ -17,24 +17,33 @@ Design language
 
 Architecture
 ------------
-The overlay runs in the **main thread** (Tkinter is not thread-safe).  The
-CV pipeline runs in a background thread and communicates with the HUD via a
-thread-safe ``queue.Queue``.  The HUD polls the queue on every Tkinter
-``after()`` tick (16 ms ≈ 60 Hz) and applies updates atomically.
+The overlay runs in the **main thread** (Qt is not thread-safe).  The CV
+pipeline runs in a background thread and communicates with the HUD via a
+thread-safe ``queue.Queue``.  The HUD polls the queue on every Qt timer tick
+(16 ms ≈ 60 Hz) and applies updates atomically.
 
 ``HUDMessage`` uses ``slots=True`` (Python 3.10+) to eliminate per-instance
 ``__dict__`` allocation at 30 FPS.
+
+Migration note
+--------------
+The original implementation used Tkinter, which crashes on macOS when Python
+is built against Tcl/Tk 9.0 (bundled with Python 3.13 via python-build-
+standalone / uv).  This version uses PyQt6, which has no such dependency and
+works correctly on all supported platforms.
 """
 
 from __future__ import annotations
 
 import queue
-import tkinter as tk
+import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from gestureify.assets.font_loader import load as _load_font
-from gestureify.config import settings
+from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtWidgets import QApplication, QWidget
+
 from gestureify.cv_engine.session_gate import SessionState
 from gestureify.utils.logger import get_logger
 
@@ -60,31 +69,23 @@ _HAND_CONNECTIONS: Tuple[Tuple[int, int], ...] = (
 # Colour palette — monochrome terminal
 # ---------------------------------------------------------------------------
 
-_BG          = "#000000"   # window background
-_PANEL_BG    = "#0a0a0a"   # canvas background
-_BORDER      = "#1c1c1c"   # subtle border
-_TEXT_DIM    = "#444444"   # inactive labels
-_TEXT_BRIGHT = "#c8c8c8"   # active / flash labels
-_GREEN_IDLE  = "#2a4a2a"   # status dot — IDLE
-_GREEN_ON    = "#39ff14"   # status dot — ACTIVE (neon green)
-_SKEL_LINE   = "#222222"   # skeleton connections
-_SKEL_DOT    = "#484848"   # skeleton joints
-_SKEL_TIP    = "#787878"   # fingertip joints (slightly brighter)
-_VOL_BG      = "#1a1a1a"   # volume bar track
-_VOL_FG      = "#3d3d3d"   # volume bar fill
-_ARC_IDLE    = "#1e3a1e"   # hold-progress arc — IDLE
-_ARC_ACTIVE  = "#39ff14"   # hold-progress arc — ACTIVE
+_BG          = QColor("#000000")
+_PANEL_BG    = QColor("#0a0a0a")
+_BORDER      = QColor("#1c1c1c")
+_TEXT_DIM    = QColor("#444444")
+_TEXT_BRIGHT = QColor("#c8c8c8")
+_GREEN_IDLE  = QColor("#2a4a2a")
+_GREEN_ON    = QColor("#39ff14")
+_SKEL_LINE   = QColor("#222222")
+_SKEL_DOT    = QColor("#484848")
+_SKEL_TIP    = QColor("#787878")
+_VOL_BG      = QColor("#1a1a1a")
+_VOL_FG      = QColor("#3d3d3d")
+_ARC_IDLE    = QColor("#1e3a1e")
+_ARC_ACTIVE  = QColor("#39ff14")
 
 # Fingertip landmark indices (brighter dot colour).
 _FINGERTIP_IDX = {4, 8, 12, 16, 20}
-
-# Monocraft font family — resolved at import time (falls back to Courier New).
-_MONO_FAMILY: str = _load_font()
-
-_FONT_MONO_SM  = (_MONO_FAMILY, 8)
-_FONT_MONO_MED = (_MONO_FAMILY, 10, "bold")
-_FONT_MONO_LG  = (_MONO_FAMILY, 11, "bold")
-
 
 # ---------------------------------------------------------------------------
 # Message dataclass
@@ -117,12 +118,174 @@ class HUDMessage:
 
 
 # ---------------------------------------------------------------------------
-# Overlay
+# HUD widget
+# ---------------------------------------------------------------------------
+
+_HUD_W = 260
+_HUD_H = 210
+_CANVAS_SZ = 120
+_CANVAS_X = (_HUD_W - _CANVAS_SZ) // 2   # centred horizontally
+_CANVAS_Y = 30                             # below the status bar
+_MARGIN = 12
+_ACTION_Y = _CANVAS_Y + _CANVAS_SZ + 6
+_VOL_Y = _ACTION_Y + 18
+_VOL_H = 2
+
+
+class _HUDWidget(QWidget):
+    """Internal Qt widget that owns all drawing logic."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._state: SessionState = SessionState.IDLE
+        self._landmarks: Optional[_LandmarkList] = None
+        self._hold_progress: float = 0.0
+        self._action_label: str = ""
+        self._volume: float = 0.5
+        self._action_timer = QTimer(self)
+        self._action_timer.setSingleShot(True)
+        self._action_timer.timeout.connect(self._clear_action)
+
+        # Window flags: frameless, always-on-top, tool window (no taskbar entry)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setFixedSize(_HUD_W, _HUD_H)
+        self.move(40, 40)
+
+    # ------------------------------------------------------------------
+    # State updates (called from the main thread via the poll timer)
+    # ------------------------------------------------------------------
+
+    def apply(self, msg: HUDMessage) -> None:
+        self._state = msg.session_state
+        self._landmarks = msg.landmarks
+        self._hold_progress = msg.hold_progress
+        if msg.action_label:
+            self._action_label = msg.action_label.upper()
+            self._action_timer.start(1000)
+        if msg.volume_percent is not None:
+            self._volume = max(0.0, min(1.0, msg.volume_percent / 100))
+        self.update()  # schedule a repaint
+
+    def _clear_action(self) -> None:
+        self._action_label = ""
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Painting
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, _event: object) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Background
+        p.fillRect(self.rect(), _BG)
+
+        self._draw_status(p)
+        self._draw_canvas(p)
+        self._draw_skeleton(p)
+        self._draw_arc(p)
+        self._draw_action(p)
+        self._draw_volume(p)
+
+        p.end()
+
+    def _draw_status(self, p: QPainter) -> None:
+        """Draw the status dot and IDLE/ACTIVE label."""
+        active = self._state is SessionState.ACTIVE
+        dot_colour = _GREEN_ON if active else _GREEN_IDLE
+        text_colour = _GREEN_ON if active else _TEXT_DIM
+        label = " ACTIVE" if active else " IDLE"
+
+        p.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        p.setPen(QPen(dot_colour))
+        p.drawText(10, 20, "●")
+
+        p.setPen(QPen(text_colour))
+        p.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        p.drawText(24, 20, label)
+
+    def _draw_canvas(self, p: QPainter) -> None:
+        """Draw the skeleton canvas background and border."""
+        p.fillRect(_CANVAS_X, _CANVAS_Y, _CANVAS_SZ, _CANVAS_SZ, _PANEL_BG)
+        p.setPen(QPen(_BORDER, 1))
+        p.drawRect(_CANVAS_X, _CANVAS_Y, _CANVAS_SZ - 1, _CANVAS_SZ - 1)
+
+    def _draw_skeleton(self, p: QPainter) -> None:
+        """Draw the hand skeleton onto the canvas."""
+        if not self._landmarks:
+            return
+
+        usable = _CANVAS_SZ - 2 * _MARGIN
+
+        def px(lm: Tuple[float, float]) -> Tuple[int, int]:
+            return (
+                _CANVAS_X + _MARGIN + int(lm[0] * usable),
+                _CANVAS_Y + _MARGIN + int(lm[1] * usable),
+            )
+
+        pts = [px(lm) for lm in self._landmarks]
+
+        # Connections
+        p.setPen(QPen(_SKEL_LINE, 1))
+        for a, b in _HAND_CONNECTIONS:
+            if a < len(pts) and b < len(pts):
+                p.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
+
+        # Joints
+        p.setPen(Qt.PenStyle.NoPen)
+        for i, (x, y) in enumerate(pts):
+            colour = _SKEL_TIP if i in _FINGERTIP_IDX else _SKEL_DOT
+            r = 3 if i in _FINGERTIP_IDX else 2
+            p.setBrush(colour)
+            p.drawEllipse(x - r, y - r, r * 2, r * 2)
+
+    def _draw_arc(self, p: QPainter) -> None:
+        """Draw the hold-progress arc around the canvas."""
+        colour = _ARC_ACTIVE if self._state is SessionState.ACTIVE else _ARC_IDLE
+        pen = QPen(colour, 2)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        extent = int(self._hold_progress * 360 * 16)  # Qt uses 1/16th degrees
+        if extent > 0:
+            p.drawArc(
+                _CANVAS_X + 3,
+                _CANVAS_Y + 3,
+                _CANVAS_SZ - 6,
+                _CANVAS_SZ - 6,
+                90 * 16,       # start at 12 o'clock
+                -extent,       # counter-clockwise
+            )
+
+    def _draw_action(self, p: QPainter) -> None:
+        """Draw the action flash label."""
+        if not self._action_label:
+            return
+        p.setPen(QPen(_TEXT_BRIGHT))
+        p.setFont(QFont("Courier New", 8))
+        p.drawText(0, _ACTION_Y + 12, _HUD_W, 14, Qt.AlignmentFlag.AlignHCenter, self._action_label)
+
+    def _draw_volume(self, p: QPainter) -> None:
+        """Draw the volume bar."""
+        p.fillRect(10, _VOL_Y, _HUD_W - 20, _VOL_H, _VOL_BG)
+        fill_w = int((_HUD_W - 20) * self._volume)
+        if fill_w > 0:
+            p.fillRect(10, _VOL_Y, fill_w, _VOL_H, _VOL_FG)
+
+
+# ---------------------------------------------------------------------------
+# Public overlay class
 # ---------------------------------------------------------------------------
 
 
 class HUDOverlay:
-    """Minimal Tkinter floating overlay.
+    """Minimal Qt floating overlay.
 
     Parameters
     ----------
@@ -131,182 +294,56 @@ class HUDOverlay:
         objects.
     """
 
-    _POLL_MS: int = 16          # ~60 Hz UI refresh.
-    _CANVAS_SZ: int = 120       # Square skeleton canvas.
-    _MARGIN: int = 12           # Padding inside canvas.
+    _POLL_MS: int = 16  # ~60 Hz UI refresh
 
     def __init__(self, message_queue: "queue.Queue[HUDMessage]") -> None:
         self._q = message_queue
-        self._root: Optional[tk.Tk] = None
-        self._flash_id: Optional[str] = None
-        self._cur_state: SessionState = SessionState.IDLE
+        self._app: Optional[QApplication] = None
+        self._widget: Optional[_HUDWidget] = None
+        self._timer: Optional[QTimer] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Build the window and enter the Tkinter event loop (blocking)."""
-        self._root = tk.Tk()
-        self._build()
-        self._poll()
-        self._root.mainloop()
+        """Build the window and enter the Qt event loop (blocking)."""
+        # QApplication must be created before any QWidget.
+        # If one already exists (e.g. in tests) reuse it.
+        self._app = QApplication.instance() or QApplication(sys.argv)
+
+        self._widget = _HUDWidget()
+        self._widget.show()
+
+        self._timer = QTimer()
+        self._timer.setInterval(self._POLL_MS)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start()
+
+        self._app.exec()
 
     def stop(self) -> None:
         """Destroy the window and exit the event loop."""
-        if self._root is not None:
-            self._root.quit()
-            self._root.destroy()
-            self._root = None
-            logger.info("HUD overlay closed.")
+        if self._timer is not None:
+            self._timer.stop()
+        if self._widget is not None:
+            self._widget.close()
+            self._widget = None
+        if self._app is not None:
+            self._app.quit()
+            self._app = None
+        logger.info("HUD overlay closed.")
 
     # ------------------------------------------------------------------
-    # Window construction
-    # ------------------------------------------------------------------
-
-    def _build(self) -> None:
-        """Construct all Tkinter widgets."""
-        r = self._root
-        r.title("")
-        r.geometry(f"{settings.HUD_WIDTH}x{settings.HUD_HEIGHT}+40+40")
-        r.attributes("-topmost", True)
-        r.attributes("-alpha", settings.HUD_ALPHA)
-        r.configure(bg=_BG)
-        r.resizable(False, False)
-        r.protocol("WM_DELETE_WINDOW", self.stop)
-
-        # ── Top bar: status dot + state text ──────────────────────────
-        top = tk.Frame(r, bg=_BG)
-        top.pack(fill=tk.X, padx=10, pady=(8, 2))
-
-        self._dot = tk.Label(top, text="●", font=_FONT_MONO_LG,
-                             fg=_GREEN_IDLE, bg=_BG)
-        self._dot.pack(side=tk.LEFT)
-
-        self._state_lbl = tk.Label(top, text=" IDLE", font=_FONT_MONO_MED,
-                                   fg=_TEXT_DIM, bg=_BG)
-        self._state_lbl.pack(side=tk.LEFT)
-
-        # ── Skeleton canvas ───────────────────────────────────────────
-        self._canvas = tk.Canvas(
-            r,
-            width=self._CANVAS_SZ,
-            height=self._CANVAS_SZ,
-            bg=_PANEL_BG,
-            highlightthickness=1,
-            highlightbackground=_BORDER,
-        )
-        self._canvas.pack(pady=(2, 2))
-
-        # Hold-progress arc (drawn on top of canvas background).
-        sz = self._CANVAS_SZ
-        self._arc = self._canvas.create_arc(
-            3, 3, sz - 3, sz - 3,
-            start=90, extent=0,
-            outline=_ARC_IDLE, width=2, style=tk.ARC,
-        )
-
-        # ── Action flash label ────────────────────────────────────────
-        self._action_lbl = tk.Label(
-            r, text="", font=_FONT_MONO_SM,
-            fg=_TEXT_BRIGHT, bg=_BG,
-        )
-        self._action_lbl.pack(pady=(1, 2))
-
-        # ── Volume bar ────────────────────────────────────────────────
-        vol_outer = tk.Frame(r, bg=_BG)
-        vol_outer.pack(fill=tk.X, padx=10, pady=(0, 6))
-
-        self._vol_track = tk.Frame(vol_outer, bg=_VOL_BG, height=2)
-        self._vol_track.pack(fill=tk.X)
-
-        self._vol_fill = tk.Frame(self._vol_track, bg=_VOL_FG, height=2)
-        self._vol_fill.place(x=0, y=0, relwidth=0.5, height=2)
-
-    # ------------------------------------------------------------------
-    # Polling and rendering
+    # Polling
     # ------------------------------------------------------------------
 
     def _poll(self) -> None:
-        """Drain the message queue and schedule the next poll."""
+        """Drain the message queue and apply updates to the widget."""
         try:
             while True:
                 msg: HUDMessage = self._q.get_nowait()
-                self._render(msg)
+                if self._widget is not None:
+                    self._widget.apply(msg)
         except queue.Empty:
             pass
-        if self._root is not None:
-            self._root.after(self._POLL_MS, self._poll)
-
-    def _render(self, msg: HUDMessage) -> None:
-        """Apply a ``HUDMessage`` to all widgets."""
-        self._update_status(msg.session_state)
-        self._update_skeleton(msg.landmarks)
-        self._update_arc(msg.hold_progress, msg.session_state)
-        if msg.action_label:
-            self._flash(msg.action_label)
-        if msg.volume_percent is not None:
-            self._update_vol(msg.volume_percent)
-
-    def _update_status(self, state: SessionState) -> None:
-        """Update the status dot and label."""
-        if state is self._cur_state:
-            return
-        self._cur_state = state
-        if state is SessionState.ACTIVE:
-            self._dot.configure(fg=_GREEN_ON)
-            self._state_lbl.configure(text=" ACTIVE", fg=_GREEN_ON)
-        else:
-            self._dot.configure(fg=_GREEN_IDLE)
-            self._state_lbl.configure(text=" IDLE", fg=_TEXT_DIM)
-
-    def _update_skeleton(self, landmarks: Optional[_LandmarkList]) -> None:
-        """Redraw the hand skeleton on the canvas."""
-        self._canvas.delete("sk")
-        if not landmarks:
-            return
-
-        sz = self._CANVAS_SZ
-        m = self._MARGIN
-        usable = sz - 2 * m
-
-        def px(lm: Tuple[float, float]) -> Tuple[int, int]:
-            return int(lm[0] * usable) + m, int(lm[1] * usable) + m
-
-        pts = [px(lm) for lm in landmarks]
-
-        for a, b in _HAND_CONNECTIONS:
-            if a < len(pts) and b < len(pts):
-                self._canvas.create_line(
-                    pts[a][0], pts[a][1], pts[b][0], pts[b][1],
-                    fill=_SKEL_LINE, width=1, tags="sk",
-                )
-
-        for i, (x, y) in enumerate(pts):
-            r = 3 if i in _FINGERTIP_IDX else 2
-            colour = _SKEL_TIP if i in _FINGERTIP_IDX else _SKEL_DOT
-            self._canvas.create_oval(
-                x - r, y - r, x + r, y + r,
-                fill=colour, outline="", tags="sk",
-            )
-
-    def _update_arc(self, progress: float, state: SessionState) -> None:
-        """Update the hold-progress arc extent and colour."""
-        extent = -int(progress * 360)
-        colour = _ARC_ACTIVE if state is SessionState.ACTIVE else _ARC_IDLE
-        self._canvas.itemconfigure(self._arc, extent=extent, outline=colour)
-
-    def _flash(self, label: str) -> None:
-        """Show *label* briefly then clear it."""
-        self._action_lbl.configure(text=label.upper())
-        if self._flash_id is not None:
-            self._root.after_cancel(self._flash_id)  # type: ignore[union-attr]
-        self._flash_id = self._root.after(  # type: ignore[union-attr]
-            settings.HUD_ACTION_LABEL_MS,
-            lambda: self._action_lbl.configure(text=""),
-        )
-
-    def _update_vol(self, pct: int) -> None:
-        """Update the volume fill bar."""
-        rel = max(0.0, min(1.0, pct / 100))
-        self._vol_fill.place(relwidth=rel)
