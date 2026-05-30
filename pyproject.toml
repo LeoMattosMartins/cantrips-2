@@ -12,8 +12,8 @@ license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "LeoMattosMartins" }]
 
 dependencies = [
-    # Computer vision — MediaPipe requires >=3.10, pins to specific OpenCV build.
-    "mediapipe>=0.10.0",
+    # Computer vision — MediaPipe Tasks API (mp.solutions was removed in 0.10.21).
+    "mediapipe>=0.10.21",
     "opencv-python>=4.8.0",
     # JAX for vectorised landmark arithmetic (CPU build; no CUDA required).
     "jax[cpu]>=0.4.25",
