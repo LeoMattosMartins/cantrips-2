@@ -255,5 +255,15 @@ class SpotifyAuth:
             def log_message(self, *args) -> None:  # noqa: ANN002
                 pass  # Suppress default HTTP server logging.
 
-        server = HTTPServer(("localhost", port), _Handler)
+        class _ReuseServer(HTTPServer):
+            """HTTPServer subclass with SO_REUSEADDR to survive TIME_WAIT."""
+
+            allow_reuse_address = True
+
+            def server_bind(self) -> None:
+                import socket
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                super().server_bind()
+
+        server = _ReuseServer(("localhost", port), _Handler)
         return server

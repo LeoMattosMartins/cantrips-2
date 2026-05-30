@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gestureify"
+version = "0.1.0"
+description = "Control Spotify with hand gestures via your webcam."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "LeoMattosMartins" }]
+
+dependencies = [
+    # Computer vision — MediaPipe requires >=3.10, pins to specific OpenCV build.
+    "mediapipe>=0.10.0",
+    "opencv-python>=4.8.0",
+    # JAX for vectorised landmark arithmetic (CPU build; no CUDA required).
+    "jax[cpu]>=0.4.25",
+    # Input simulation — OS media key fallback.
+    "pynput>=1.7.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.4.0",
+    "mypy>=1.9.0",
+]
+
+[project.scripts]
+# Allows: uv run gestureify
+gestureify = "main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gestureify"]
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter (replaces flake8, isort, pyupgrade, black)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "ANN", # flake8-annotations (enforce type hints)
+    "S",   # flake8-bandit (security)
+    "N",   # pep8-naming
+]
+ignore = [
+    "ANN101", # missing type annotation for self
+    "ANN102", # missing type annotation for cls
+    "S603",   # subprocess — not used here
+    "S310",   # urllib.request.urlopen — intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "S"]
+
+# ---------------------------------------------------------------------------
+# Mypy — strict static type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

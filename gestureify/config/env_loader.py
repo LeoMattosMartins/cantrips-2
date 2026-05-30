@@ -19,23 +19,23 @@ Design notes
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 from pathlib import Path
 from typing import Dict
+
+from gestureify.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Keys that MUST be present in the environment (or .env file).
-REQUIRED_KEYS: tuple[str, ...] = (
-    "SPOTIFY_CLIENT_ID",
-)
+REQUIRED_KEYS: tuple[str, ...] = ("SPOTIFY_CLIENT_ID",)
 
-# Optional keys and their fallback values (pulled from settings if absent).
+# Optional keys with defaults sourced from settings (single source of truth).
 _OPTIONAL_DEFAULTS: Dict[str, str] = {
-    "SPOTIFY_REDIRECT_URI": "http://localhost:8080/callback",
-    "LOG_LEVEL": "INFO",
-    "CAMERA_INDEX": "0",
+    "SPOTIFY_REDIRECT_URI": settings.SPOTIFY_REDIRECT_URI,
+    "LOG_LEVEL": settings.LOG_LEVEL,
+    "CAMERA_INDEX": str(settings.CAMERA_INDEX),
 }
 
 

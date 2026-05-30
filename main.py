@@ -48,7 +48,7 @@ from gestureify.cv_engine.capture import CameraCapture
 from gestureify.cv_engine.gesture_classifier import GestureClassifier, GestureLabel
 from gestureify.cv_engine.landmark_extractor import LandmarkExtractor
 from gestureify.cv_engine.pipeline import CVPipeline, FrameResult
-from gestureify.cv_engine.session_gate import SessionGate
+from gestureify.cv_engine.session_gate import SessionGate, SessionState
 from gestureify.cv_engine.swipe_detector import SwipeDetector, SwipeDirection
 from gestureify.hud.overlay import HUDMessage, HUDOverlay
 from gestureify.utils.logger import configure_root_logger, get_logger
@@ -101,9 +101,11 @@ def _cv_loop(
         action_label: str = ""
 
         if result.session_toggled:
-            action_label = _LABEL_ACTIVE if result.session_state.name == "ACTIVE" else _LABEL_IDLE
+            action_label = (
+                _LABEL_ACTIVE if result.session_state is SessionState.ACTIVE else _LABEL_IDLE
+            )
 
-        if result.session_state.name == "ACTIVE":
+        if result.session_state is SessionState.ACTIVE:
             # Swipe gestures (skip / previous).
             if result.swipe is SwipeDirection.RIGHT:
                 controller.next_track()

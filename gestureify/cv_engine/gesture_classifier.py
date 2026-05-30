@@ -14,12 +14,16 @@ Design notes
   tuned without touching this file.
 * ``GestureLabel`` is an ``IntEnum`` so it can be used in comparisons and
   stored compactly.
+* ``classify()`` returns both the label *and* the pre-computed pinch gap so
+  that ``pipeline.py`` can call ``pinch_gap()`` without re-running the JAX
+  kernel a second time on the same frame.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
+from typing import Optional, Tuple
 
 from gestureify.config import settings
 from gestureify.utils.geometry import (
@@ -38,10 +42,28 @@ class GestureLabel(IntEnum):
     Values are assigned explicitly so they remain stable across refactors.
     """
 
-    NONE = 0        # No confident gesture detected.
-    OPEN_PALM = 1   # All fingers extended — used for wake/session toggle.
-    CLOSED_FIST = 2 # All fingers folded — pause playback.
-    PINCH = 3       # Thumb tip touching index tip — volume control.
+    NONE = 0         # No confident gesture detected.
+    OPEN_PALM = 1    # All four fingers extended — used for wake/session toggle.
+    CLOSED_FIST = 2  # All fingers folded — pause playback.
+    PINCH = 3        # Thumb tip touching index tip — volume control.
+
+
+@dataclass(slots=True)
+class ClassifyResult:
+    """Output of a single ``GestureClassifier.classify_full()`` call.
+
+    Attributes
+    ----------
+    label:
+        The detected gesture.
+    pinch_gap:
+        Pre-computed normalised pinch distance (always available, even when
+        the gesture is not PINCH).  Avoids a redundant JAX kernel call in
+        ``pipeline.py``.
+    """
+
+    label: GestureLabel
+    pinch_gap: float
 
 
 class GestureClassifier:
@@ -73,11 +95,18 @@ class GestureClassifier:
         self._palm_threshold = palm_threshold
         self._pinch_threshold = pinch_threshold
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def classify(
         self,
         landmarks: Optional[LandmarkList],
     ) -> GestureLabel:
         """Return the gesture label for the given landmark list.
+
+        Prefer ``classify_full()`` in the hot path to avoid computing
+        ``pinch_distance`` twice per frame.
 
         Parameters
         ----------
@@ -87,26 +116,50 @@ class GestureClassifier:
         Returns
         -------
         GestureLabel
-            The most specific matching gesture, or ``GestureLabel.NONE``.
+        """
+        return self.classify_full(landmarks).label
+
+    def classify_full(
+        self,
+        landmarks: Optional[LandmarkList],
+    ) -> ClassifyResult:
+        """Classify the gesture and return both the label and pinch gap.
+
+        ``pinch_distance`` is computed exactly once per call and reused for
+        both the PINCH classification decision and the volume-mapping value.
+
+        Parameters
+        ----------
+        landmarks:
+            21-point normalised landmark list, or *None*.
+
+        Returns
+        -------
+        ClassifyResult
         """
         if landmarks is None:
-            return GestureLabel.NONE
+            return ClassifyResult(label=GestureLabel.NONE, pinch_gap=1.0)
 
-        if self._is_pinch(landmarks):
-            return GestureLabel.PINCH
+        gap = pinch_distance(landmarks)
+
+        if gap < self._pinch_threshold:
+            return ClassifyResult(label=GestureLabel.PINCH, pinch_gap=gap)
 
         ratio = fingertip_wrist_ratio(landmarks)
 
         if ratio < self._fist_threshold:
-            return GestureLabel.CLOSED_FIST
+            return ClassifyResult(label=GestureLabel.CLOSED_FIST, pinch_gap=gap)
 
         if ratio > self._palm_threshold:
-            return GestureLabel.OPEN_PALM
+            return ClassifyResult(label=GestureLabel.OPEN_PALM, pinch_gap=gap)
 
-        return GestureLabel.NONE
+        return ClassifyResult(label=GestureLabel.NONE, pinch_gap=gap)
 
     def pinch_gap(self, landmarks: Optional[LandmarkList]) -> float:
         """Return the normalised pinch gap for volume mapping.
+
+        This is a convenience wrapper for callers that only need the gap.
+        In the pipeline hot path, use ``classify_full()`` instead.
 
         Parameters
         ----------
@@ -122,11 +175,3 @@ class GestureClassifier:
         if landmarks is None:
             return 1.0
         return pinch_distance(landmarks)
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _is_pinch(self, landmarks: LandmarkList) -> bool:
-        """Return ``True`` if the thumb and index tips are close enough."""
-        return pinch_distance(landmarks) < self._pinch_threshold

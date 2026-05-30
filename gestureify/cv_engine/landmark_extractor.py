@@ -14,6 +14,9 @@ Design notes
 * The public ``extract()`` method returns a plain Python list of ``(x, y)``
   tuples rather than MediaPipe's internal types, so downstream modules
   have no dependency on the mediapipe package.
+* ``extract_with_drawing`` caches the raw MediaPipe result from the same
+  ``process()`` call — MediaPipe is invoked exactly once per frame regardless
+  of whether drawing is requested.
 * At most ``MP_MAX_HANDS`` hands are tracked (default 1) to keep CPU usage
   bounded (NASA Rule 2).
 """
@@ -67,7 +70,7 @@ class LandmarkExtractor:
         self.open()
         return self
 
-    def __exit__(self, *_) -> None:
+    def __exit__(self, *_: object) -> None:
         self.close()
 
     # ------------------------------------------------------------------
@@ -114,27 +117,17 @@ class LandmarkExtractor:
             A list of 21 ``(x, y)`` normalised coordinate tuples for the
             first detected hand, or *None* if no hand is detected.
         """
-        if self._hands is None:
-            logger.error("extract() called before open().")
-            return None
-
-        # MediaPipe expects RGB; convert in-place (no copy).
-        rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False
-        result = self._hands.process(rgb)
-
-        if not result.multi_hand_landmarks:
-            return None
-
-        # Take only the first detected hand.
-        hand = result.multi_hand_landmarks[0]
-        return [(lm.x, lm.y) for lm in hand.landmark]
+        landmarks, _ = self._process(bgr_frame)
+        return landmarks
 
     def extract_with_drawing(
         self,
         bgr_frame: np.ndarray,
     ) -> Tuple[Optional[LandmarkList], np.ndarray]:
         """Extract landmarks and draw the hand skeleton onto a copy of the frame.
+
+        MediaPipe is invoked exactly once — the raw result is reused for
+        both landmark extraction and skeleton drawing.
 
         Parameters
         ----------
@@ -146,19 +139,44 @@ class LandmarkExtractor:
         tuple[LandmarkList | None, numpy.ndarray]
             Landmark list (or *None*) and an annotated BGR frame copy.
         """
+        landmarks, raw_result = self._process(bgr_frame)
         annotated = bgr_frame.copy()
-        landmarks = self.extract(bgr_frame)
 
-        if landmarks is not None:
-            # Re-run to get the raw MediaPipe object for drawing utilities.
-            rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            result = self._hands.process(rgb)  # type: ignore[union-attr]
-            if result.multi_hand_landmarks:
-                mp.solutions.drawing_utils.draw_landmarks(  # type: ignore[attr-defined]
-                    annotated,
-                    result.multi_hand_landmarks[0],
-                    mp.solutions.hands.HAND_CONNECTIONS,  # type: ignore[attr-defined]
-                )
+        if raw_result is not None and raw_result.multi_hand_landmarks:
+            mp.solutions.drawing_utils.draw_landmarks(  # type: ignore[attr-defined]
+                annotated,
+                raw_result.multi_hand_landmarks[0],
+                mp.solutions.hands.HAND_CONNECTIONS,  # type: ignore[attr-defined]
+            )
 
         return landmarks, annotated
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _process(
+        self, bgr_frame: np.ndarray
+    ) -> Tuple[Optional[LandmarkList], object]:
+        """Run MediaPipe once and return both the landmark list and the raw result.
+
+        Returns
+        -------
+        tuple[LandmarkList | None, result | None]
+            Parsed landmark list and the raw MediaPipe result object (for
+            drawing utilities).  Both are *None* on failure or no detection.
+        """
+        if self._hands is None:
+            logger.error("_process() called before open().")
+            return None, None
+
+        rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        result = self._hands.process(rgb)  # type: ignore[union-attr]
+
+        if not result.multi_hand_landmarks:
+            return None, result
+
+        hand = result.multi_hand_landmarks[0]
+        landmarks: LandmarkList = [(lm.x, lm.y) for lm in hand.landmark]
+        return landmarks, result

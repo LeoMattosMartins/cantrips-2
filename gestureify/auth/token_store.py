@@ -31,7 +31,7 @@ from gestureify.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class TokenBundle:
     """Container for a Spotify OAuth2 token set.
 
@@ -142,7 +142,7 @@ class TokenStore:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, indent=2)
             os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, self._path)
+            Path(tmp_path).replace(self._path)  # cross-platform atomic rename
         except Exception:
             # Clean up the temp file on failure.
             try:

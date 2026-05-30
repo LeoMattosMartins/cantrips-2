@@ -11,15 +11,13 @@ It:
   3. Throttles volume API calls to avoid rate-limit errors.
   4. Maintains a cooldown between play/pause toggles to prevent double-fires.
 
-The controller is intentionally unaware of the CV pipeline; it only receives
-high-level commands (pause, resume, next, previous, set_volume).
-
 Design notes
 ------------
 * ``_use_api`` is a runtime flag that permanently switches to the fallback
   after a ``SpotifyPremiumRequired`` exception, avoiding repeated 403 calls.
-* ``RateGate`` objects enforce all throttle windows (NASA Rule 7: handle
-  errors at every level).
+* ``RateGate`` objects enforce all throttle windows (NASA Rule 7).
+* Volume delta is computed against a *pre-update* snapshot of ``_last_volume``
+  to avoid the off-by-one bug where the delta is always zero.
 """
 
 from __future__ import annotations
@@ -68,7 +66,7 @@ class PlaybackController:
         self._volume_gate = RateGate(settings.VOLUME_API_THROTTLE_SECONDS)
         self._playpause_gate = RateGate(settings.PLAYPAUSE_COOLDOWN_SECONDS)
 
-        # Track last known volume to compute deltas.
+        # Track last known volume to compute deltas for the key fallback.
         self._last_volume: int = 50
 
     # ------------------------------------------------------------------
@@ -99,7 +97,10 @@ class PlaybackController:
         """Skip to the next track."""
         logger.info("Command: NEXT TRACK")
         if self._use_api:
-            self._try_api(lambda t: self._spotify.next_track(t), fallback=self._keys.next_track)
+            self._try_api(
+                lambda t: self._spotify.next_track(t),
+                fallback=self._keys.next_track,
+            )
         else:
             self._keys.next_track()
 
@@ -107,7 +108,10 @@ class PlaybackController:
         """Go to the previous track."""
         logger.info("Command: PREVIOUS TRACK")
         if self._use_api:
-            self._try_api(lambda t: self._spotify.previous_track(t), fallback=self._keys.previous_track)
+            self._try_api(
+                lambda t: self._spotify.previous_track(t),
+                fallback=self._keys.previous_track,
+            )
         else:
             self._keys.previous_track()
 
@@ -125,30 +129,32 @@ class PlaybackController:
         if not self._volume_gate.allow():
             return
 
-        # Map gap [0, 0.5] → volume [0, 100].
         max_gap = 0.5
-        volume = int(min(pinch_gap / max_gap, 1.0) * 100)
-        volume = max(0, min(100, volume))
+        target = int(min(pinch_gap / max_gap, 1.0) * 100)
+        target = max(0, min(100, target))
 
-        if volume == self._last_volume:
+        if target == self._last_volume:
             return
 
-        self._last_volume = volume
-        logger.info("Command: SET VOLUME %d%%", volume)
+        # Capture delta *before* updating _last_volume.
+        delta = target - self._last_volume
+        self._last_volume = target
+
+        logger.info("Command: SET VOLUME %d%%", target)
 
         if self._use_api:
             self._try_api(
-                lambda t: self._spotify.set_volume(t, volume),
-                fallback=lambda: self._volume_key_fallback(volume),
+                lambda t: self._spotify.set_volume(t, target),
+                fallback=lambda: self._volume_key_fallback(delta),
             )
         else:
-            self._volume_key_fallback(volume)
+            self._volume_key_fallback(delta)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _try_api(self, api_call, fallback) -> None:
+    def _try_api(self, api_call, fallback) -> None:  # type: ignore[type-arg]
         """Attempt an API call; fall back to media keys on known errors."""
         try:
             token = self._auth.ensure_valid_token()
@@ -159,20 +165,29 @@ class PlaybackController:
             )
             self._use_api = False
             fallback()
-        except SpotifyRateLimited as exc:
+        except SpotifyRateLimited:
             logger.warning("Rate limited by Spotify; using media keys this time.")
             fallback()
         except Exception as exc:  # noqa: BLE001
             logger.error("Spotify API call failed: %s; using media keys.", exc)
             fallback()
 
-    def _volume_key_fallback(self, target_volume: int) -> None:
-        """Approximate *target_volume* using media key presses."""
-        delta = target_volume - self._last_volume
+    @staticmethod
+    def _volume_key_fallback(delta: int) -> None:
+        """Approximate a volume change using media key presses.
+
+        Parameters
+        ----------
+        delta:
+            Signed volume change in percentage points.  Positive = louder.
+        """
+        from gestureify.controller.media_keys import MediaKeyFallback  # avoid circular at module level
+
+        keys = MediaKeyFallback()
         steps = abs(delta) // 5  # Each step ≈ 5% volume.
         if steps == 0:
             return
         if delta > 0:
-            self._keys.volume_up(steps)
+            keys.volume_up(steps)
         else:
-            self._keys.volume_down(steps)
+            keys.volume_down(steps)
