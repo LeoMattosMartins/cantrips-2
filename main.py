@@ -60,6 +60,10 @@ _LABEL_RESUME  = "RESUME"
 _LABEL_ACTIVE  = "SESSION ON"
 _LABEL_IDLE    = "SESSION OFF"
 
+# Minimum consecutive frames a fist must be held before toggling play/pause.
+# At 30 FPS this is ~0.2 s — long enough to avoid single-frame noise.
+_FIST_DEBOUNCE_FRAMES: int = 6
+
 
 def _cv_loop(
     pipeline: CVPipeline,
@@ -70,6 +74,10 @@ def _cv_loop(
 ) -> None:
     """Main CV processing loop — runs in the background thread."""
     is_playing: bool = True
+    # Debounce state: track how many consecutive frames the fist has been held
+    # and whether we have already acted on this particular hold.
+    _fist_frames: int = 0
+    _fist_acted: bool = False
 
     for frame in capture.frames():
         if stop_event.is_set():
@@ -87,15 +95,24 @@ def _cv_loop(
             )
 
         if result.session_state is SessionState.ACTIVE:
-            if result.gesture is GestureLabel.CLOSED_FIST and is_playing:
-                controller.pause()
-                is_playing = False
-                action_label = _LABEL_PAUSE
-
-            elif result.gesture is GestureLabel.OPEN_PALM and not is_playing:
-                controller.resume()
-                is_playing = True
-                action_label = _LABEL_RESUME
+            if result.gesture is GestureLabel.CLOSED_FIST:
+                _fist_frames += 1
+                if _fist_frames >= _FIST_DEBOUNCE_FRAMES and not _fist_acted:
+                    # Toggle play/pause on the first confirmed fist hold.
+                    if is_playing:
+                        controller.pause()
+                        is_playing = False
+                        action_label = _LABEL_PAUSE
+                    else:
+                        controller.resume()
+                        is_playing = True
+                        action_label = _LABEL_RESUME
+                    _fist_acted = True
+            else:
+                # Hand is no longer a fist — reset debounce so the next
+                # fist hold can fire again.
+                _fist_frames = 0
+                _fist_acted = False
 
         # Build and enqueue HUD message.
         msg = HUDMessage(
