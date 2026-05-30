@@ -120,7 +120,12 @@ class CameraCapture:
         if self._cap is None:
             return None
         ok, frame = self._cap.read()
-        return frame if ok else None
+        if not ok or frame is None:
+            return None
+        # Mirror horizontally so the feed behaves like a selfie / mirror view.
+        # This makes swipe directions intuitive (move hand right → RIGHT swipe)
+        # and ensures left/right hand classification matches the user's perspective.
+        return cv2.flip(frame, 1)
 
     def frames(self) -> Generator[np.ndarray, None, None]:
         """Yield frames continuously until the camera is closed or fails.

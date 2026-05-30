@@ -146,13 +146,17 @@ class _HUDWidget(QWidget):
         self._action_timer.setSingleShot(True)
         self._action_timer.timeout.connect(self._clear_action)
 
-        # Window flags: frameless, always-on-top, tool window (no taskbar entry)
+        # Window flags: frameless, always-on-top.
+        # Note: Qt.WindowType.Tool hides the window from the macOS Dock but
+        # can also prevent it from appearing at all on some macOS versions
+        # unless the app has an NSApplication activation policy set.
+        # Using the plain frameless + stays-on-top combination is more reliable.
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setWindowOpacity(0.92)
+        self.setWindowTitle("Gestureify HUD")
         self.setFixedSize(_HUD_W, _HUD_H)
         self.move(40, 40)
 
@@ -313,7 +317,11 @@ class HUDOverlay:
         self._app = QApplication.instance() or QApplication(sys.argv)
 
         self._widget = _HUDWidget()
+        # On macOS, frameless Tool windows can silently stay hidden unless
+        # show() is followed by raise_() and activateWindow().
         self._widget.show()
+        self._widget.raise_()
+        self._widget.activateWindow()
 
         self._timer = QTimer()
         self._timer.setInterval(self._POLL_MS)
